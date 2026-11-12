@@ -1,0 +1,16 @@
+# Runtime state and private config: never commit
+allowed_users.txt
+forward_chats.txt
+alert_chat.txt
+state.json
+inbox.jsonl
+denied.jsonl
+*.log
+*.log.*
+supervisor.status.json
+*.tmp
+.relay.lock
+.supervisor.lock
+run.pid
+__pycache__/
+*.env

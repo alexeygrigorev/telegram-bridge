@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""tg-reply: send a Telegram message or file as the bot.
+
+Usage:
+  tg-reply <chat_id> "text"
+  tg-reply <chat_id> [--reply-to MSG_ID] [--file PATH] [--plain] < text-on-stdin
+
+Token is read from env DATAOPS_TELEGRAM_BOT_TOKEN (never printed).
+Text >4000 chars is split into chunks. Markdown is tried first and falls
+back to plain text if Telegram rejects it (HTTP 400). With --file the
+document is sent via sendDocument (text, if <=1024 chars, becomes the caption;
+longer text is sent as separate message(s) after the file).
+"""
+import argparse
+import json
+import mimetypes
+import os
+import sys
+import urllib.error
+import urllib.request
+import uuid
+
+MAX_CHUNK = 4000
+MAX_CAPTION = 1024
+
+
+def die(msg, code=1):
+    print("tg-reply: error: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def token():
+    t = os.environ.get("DATAOPS_TELEGRAM_BOT_TOKEN", "").strip()
+    if not t:
+        die("DATAOPS_TELEGRAM_BOT_TOKEN is not set in the environment", 2)
+    return t
+
+
+class ApiError(Exception):
+    def __init__(self, code, desc):
+        super().__init__("HTTP %s: %s" % (code, desc))
+        self.code = code
+
+
+def call(method, data, content_type):
+    url = "https://api.telegram.org/bot%s/%s" % (token(), method)
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": content_type})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            body = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            desc = json.loads(e.read().decode()).get("description", "")
+        except Exception:
+            desc = ""
+        raise ApiError(e.code, desc) from None
+    except (urllib.error.URLError, OSError) as e:
+        raise ApiError("network", str(getattr(e, "reason", e))) from None
+    if not body.get("ok"):
+        raise ApiError(body.get("error_code"), body.get("description"))
+    return body["result"]
+
+
+def call_json(method, params):
+    return call(method, json.dumps(params).encode(), "application/json")
+
+
+def call_multipart(method, fields, file_field, path):
+    boundary = uuid.uuid4().hex
+    parts = []
+    for k, v in fields.items():
+        parts.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % (boundary, k, v)).encode())
+    fname = os.path.basename(path)
+    ctype = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    with open(path, "rb") as f:
+        content = f.read()
+    parts.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n"
+                  % (boundary, file_field, fname.replace('"', "_"), ctype)).encode() + content + b"\r\n")
+    parts.append(("--%s--\r\n" % boundary).encode())
+    return call(method, b"".join(parts), "multipart/form-data; boundary=" + boundary)
+
+
+def chunks(text, n=MAX_CHUNK):
+    out = []
+    while len(text) > n:
+        cut = text.rfind("\n", 0, n)
+        if cut < n // 2:
+            cut = text.rfind(" ", 0, n)
+        if cut < n // 2:
+            cut = n
+        out.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    if text:
+        out.append(text)
+    return out
+
+
+def with_markdown_fallback(send, plain):
+    """send(extra_params) -> result; try Markdown, fall back to plain on 400."""
+    if plain:
+        return send({})
+    try:
+        return send({"parse_mode": "Markdown"})
+    except ApiError as e:
+        if e.code == 400:
+            return send({})
+        raise
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="tg-reply", description="Send a Telegram message as the bot.")
+    ap.add_argument("chat_id")
+    ap.add_argument("text", nargs="?", help="message text (otherwise read from stdin)")
+    ap.add_argument("--reply-to", type=int, metavar="MSG_ID")
+    ap.add_argument("--file", metavar="PATH", help="send this file with sendDocument")
+    ap.add_argument("--plain", action="store_true", help="skip Markdown, send plain text")
+    a = ap.parse_args()
+
+    text = a.text
+    if text is None and not sys.stdin.isatty():
+        text = sys.stdin.read()
+    text = (text or "").strip("\n")
+    if not text.strip() and not a.file:
+        die("no text given (pass as argument or on stdin) and no --file")
+    if a.file and not os.path.isfile(a.file):
+        die("file not found: %s" % a.file)
+
+    reply = {"reply_to_message_id": a.reply_to, "allow_sending_without_reply": True} if a.reply_to else {}
+    sent = []
+    try:
+        if a.file:
+            caption = text if text and len(text) <= MAX_CAPTION else None
+
+            def send_doc(extra):
+                fields = {"chat_id": a.chat_id}
+                fields.update({k: (json.dumps(v) if isinstance(v, bool) else v) for k, v in reply.items()})
+                if caption:
+                    fields["caption"] = caption
+                    fields.update(extra)
+                return call_multipart("sendDocument", fields, "document", a.file)
+
+            sent.append(with_markdown_fallback(send_doc, a.plain or not caption))
+            if caption:
+                text = ""
+            reply = {}
+        for i, part in enumerate(chunks(text) if text else []):
+            params = {"chat_id": a.chat_id, "text": part}
+            if i == 0:
+                params.update(reply)
+            sent.append(with_markdown_fallback(lambda extra: call_json("sendMessage", dict(params, **extra)), a.plain))
+    except ApiError as e:
+        die("send failed after %d message(s): %s" % (len(sent), e))
+    print("sent %d message(s): ids %s" % (len(sent), ",".join(str(m.get("message_id")) for m in sent)))
+
+
+if __name__ == "__main__":
+    main()
