@@ -40,6 +40,15 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(message, "external heartbeat failed (URLError)")
         self.assertNotIn("private-check-id", message)
 
+    def test_lock_conflicts_get_a_hint(self):
+        self.assertEqual(supervisor.exit_hint("telegram-relay", supervisor.RELAY_LOCK_HELD_RC),
+                         " (another relay holds the lock: two relays?)")
+        self.assertEqual(supervisor.exit_hint("grok-library-sync", supervisor.SYNC_LOCK_HELD_RC),
+                         " (another sync loop holds the lock: legacy daemon?)")
+        self.assertEqual(supervisor.exit_hint("telegram-relay", 1), "")
+        self.assertEqual(supervisor.exit_hint("grok-library-sync", 0), "")
+        self.assertEqual(supervisor.exit_hint("other", supervisor.SYNC_LOCK_HELD_RC), "")
+
 
 class HeartbeatRequestTests(unittest.TestCase):
     def test_post_json_with_optional_bearer(self):
@@ -199,6 +208,41 @@ class SuperviseTests(unittest.TestCase):
                 else:
                     self.assertEqual(len(crash_alerts), 2)
                     self.assertIn(f"CRASH: sync exited rc={rc}", crash_alerts[0])
+
+    def test_sync_lock_conflict_exit_gets_a_hint(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            marker = base / "runs"
+            script = base / "child.py"
+            script.write_text("import sys\nopen(sys.argv[1], 'a').write('x')\nsys.exit(4)\n")
+            children = [supervisor.Child("grok-library-sync", [sys.executable, str(script), str(marker)])]
+            alerts = []
+            alert = lambda key, text, force=False: alerts.append(text) or True  # noqa: E731
+            hint = "another sync loop holds the lock: legacy daemon?"
+            real_write = supervisor.write_status
+            time_sleep = time.sleep
+            output = io.StringIO()
+            with mock.patch.object(supervisor, "MIN_RESTART_DELAY", 0), \
+                    mock.patch.object(supervisor.time, "sleep", side_effect=lambda s: time_sleep(0.05)), \
+                    redirect_stdout(output):
+                children[0].restart_delay = 0
+                deadline = time.time() + 5
+
+                def stop_when_restarted(*_a):
+                    if (marker.exists() and len(marker.read_text()) >= 2) or time.time() > deadline:
+                        raise KeyboardInterrupt
+                with mock.patch.object(supervisor, "write_status",
+                                       side_effect=lambda *a: (real_write(*a), stop_when_restarted())):
+                    try:
+                        supervisor.supervise(children, base, None, 60, alert)
+                    except KeyboardInterrupt:
+                        pass
+
+            self.assertIn(hint, output.getvalue())
+            crash_alerts = [text for text in alerts if text.startswith("CRASH:")]
+            self.assertTrue(crash_alerts)
+            self.assertIn(f"CRASH: grok-library-sync exited rc={supervisor.SYNC_LOCK_HELD_RC}", crash_alerts[0])
+            self.assertIn(hint, crash_alerts[0])
 
     def test_python_children_are_unbuffered_and_keep_environment(self):
         child = supervisor.Child("sync", [sys.executable, "sync.py"])
