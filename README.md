@@ -40,6 +40,7 @@ checkout itself. To use another one, pass `--base-dir` or set
 |---|---|---|
 | `DATAOPS_TELEGRAM_BOT_TOKEN` | yes | Bot token from BotFather. |
 | `OPERATOR_COMMS_HEARTBEAT_URL` | supervisor | HTTPS ping URL of an external dead-man check (healthchecks.io, Better Stack, Cronitor, ...). If pings stop, that service should page the on-call. |
+| `OPERATOR_COMMS_HEARTBEAT_TOKEN` | no | Bearer token sent with each heartbeat, for endpoints that need auth. Heartbeats are a JSON `POST` (`{"source":"telegram-bridge","host":...}`). |
 | `DATAOPS_ROUTINE_WEBHOOK_URL` | no | Where messages are POSTed. If it is unset, messages are queued in `inbox.jsonl`. |
 | `DATAOPS_ROUTINE_WEBHOOK_KEY` | no | Value of the webhook auth header. For `Authorization`, `Bearer ` is added if missing. |
 | `DATAOPS_ROUTINE_WEBHOOK_HEADER` | no | Name of the auth header (default `Authorization`). |

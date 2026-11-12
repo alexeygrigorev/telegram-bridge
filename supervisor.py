@@ -36,9 +36,11 @@ HERE = Path(__file__).resolve().parent
 MIN_RESTART_DELAY = 5
 MAX_RESTART_DELAY = 300
 HEALTHY_RUNTIME_SECONDS = 60
+STABLE_SECONDS = 30
 ALERT_COOLDOWN = 600
 TOKEN_ENV = "DATAOPS_TELEGRAM_BOT_TOKEN"
 HEARTBEAT_ENV = "OPERATOR_COMMS_HEARTBEAT_URL"
+HEARTBEAT_TOKEN_ENV = "OPERATOR_COMMS_HEARTBEAT_TOKEN"
 RELAY_LOCK_HELD_RC = 3
 
 
@@ -65,6 +67,12 @@ def next_restart_delay(current_delay: int, runtime_seconds: float) -> int:
     if runtime_seconds >= HEALTHY_RUNTIME_SECONDS:
         return MIN_RESTART_DELAY
     return min(max(current_delay, MIN_RESTART_DELAY) * 2, MAX_RESTART_DELAY)
+
+
+def child_is_stable(child: Child, now: float) -> bool:
+    """Alive and up for STABLE_SECONDS, so a crash loop cannot slip a heartbeat through."""
+    alive = child.process is not None and child.process.poll() is None
+    return alive and now - child.started_at >= STABLE_SECONDS
 
 
 def heartbeat_failure_message(error: BaseException) -> str:
@@ -190,8 +198,22 @@ def start_child(child: Child, now: float) -> None:
         log(f"could not start child={child.name} ({type(error).__name__})")
 
 
-def ping_heartbeat(url: str) -> str | None:
-    request = urllib.request.Request(url, headers={"User-Agent": "telegram-bridge-supervisor"})
+def heartbeat_request(url: str, children: list[Child]) -> urllib.request.Request:
+    """POST a small JSON body; add a bearer token when OPERATOR_COMMS_HEARTBEAT_TOKEN is set."""
+    headers = {"User-Agent": "telegram-bridge-supervisor", "Content-Type": "application/json"}
+    token = os.environ.get(HEARTBEAT_TOKEN_ENV, "").strip()
+    if token:
+        headers["Authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    body = json.dumps({
+        "source": "telegram-bridge",
+        "host": os.uname().nodename,
+        "children": [c.name for c in children],
+        "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }).encode()
+    return urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+
+def ping_heartbeat(request: urllib.request.Request) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             if 200 <= response.status < 300:
@@ -276,7 +298,7 @@ def supervise(children: list[Child], base_dir: Path, heartbeat_url: str | None, 
     now = time.monotonic()
     for child in children:
         start_child(child, now)
-    next_heartbeat_at = now + min(interval, 15)
+    next_heartbeat_at = now + STABLE_SECONDS + 1
     next_status_at = now
     log("supervisor started")
     alert("start", "supervisor started; children: " + ", ".join(c.name for c in children), force=True)
@@ -307,12 +329,13 @@ def supervise(children: list[Child], base_dir: Path, heartbeat_url: str | None, 
                       f"{int(runtime)}s{hint}; restarting in {delay}s")
 
             if now >= next_heartbeat_at:
-                healthy = all(c.process is not None and c.process.poll() is None for c in children)
+                healthy = all(child_is_stable(c, now) for c in children)
                 if not healthy:
-                    log("external heartbeat withheld while a child is down")
+                    log("external heartbeat withheld: a child is down or restarted less than "
+                        f"{STABLE_SECONDS}s ago")
                     health.last_heartbeat_error = "withheld: child down"
                 elif heartbeat_url:
-                    error = ping_heartbeat(heartbeat_url)
+                    error = ping_heartbeat(heartbeat_request(heartbeat_url, children))
                     if error:
                         log(error)
                         health.last_heartbeat_error = error

@@ -18,6 +18,16 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(supervisor.next_restart_delay(150, 3), 300)
         self.assertEqual(supervisor.next_restart_delay(300, 3), 300)
 
+    def test_fresh_or_dead_child_is_not_stable(self):
+        child = supervisor.Child("x", ["true"])
+        self.assertFalse(supervisor.child_is_stable(child, 100.0))
+        child.process = mock.Mock(**{"poll.return_value": None})
+        child.started_at = 90.0
+        self.assertFalse(supervisor.child_is_stable(child, 100.0))
+        self.assertTrue(supervisor.child_is_stable(child, 130.0))
+        child.process.poll.return_value = 1
+        self.assertFalse(supervisor.child_is_stable(child, 130.0))
+
     def test_long_running_child_resets_backoff(self):
         self.assertEqual(supervisor.next_restart_delay(120, 60), 5)
 
@@ -26,6 +36,19 @@ class PolicyTests(unittest.TestCase):
         message = supervisor.heartbeat_failure_message(error)
         self.assertEqual(message, "external heartbeat failed (URLError)")
         self.assertNotIn("private-check-id", message)
+
+
+class HeartbeatRequestTests(unittest.TestCase):
+    def test_post_json_with_optional_bearer(self):
+        children = supervisor.make_children(Path("/tmp"), [])
+        with mock.patch.dict(os.environ, {"OPERATOR_COMMS_HEARTBEAT_TOKEN": "fake-hb-token"}):
+            req = supervisor.heartbeat_request("https://hc.example.invalid/x", children)
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.get_header("Authorization"), "Bearer fake-hb-token")
+        self.assertEqual(json.loads(req.data)["source"], "telegram-bridge")
+        with mock.patch.dict(os.environ, {"OPERATOR_COMMS_HEARTBEAT_TOKEN": ""}):
+            req = supervisor.heartbeat_request("https://hc.example.invalid/x", children)
+        self.assertIsNone(req.get_header("Authorization"))
 
 
 class ChildrenTests(unittest.TestCase):
