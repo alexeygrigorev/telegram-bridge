@@ -63,8 +63,10 @@ the files on every message, so changes need no restart.
 | `forward_chats.txt` | Group chat ids whose messages are all forwarded, from any member. |
 | `alert_chat.txt` | One chat id that receives alerts about drops, webhook failures, crashes and heartbeat failures. |
 
-If no alert chat is configured, alerts only go to the log and the
-supervisor's `--check` fails.
+If no alert chat is configured, alerts only go to the log. `--check`
+still passes when an external heartbeat is configured, so the dead-man can
+page the on-call. Without both an alert chat and a heartbeat, `--check`
+fails.
 
 ### Webhook payload
 
@@ -110,9 +112,9 @@ Options:
 
 | Event | Alert |
 |---|---|
-| A child exits or crashes | Telegram message to the alert chat ("CRASH: ..."), at most one per child every 10 minutes; each exit is also logged. |
-| The supervisor starts or stops | Telegram message (a start after a reboot shows that it came back). |
-| A heartbeat ping fails | Telegram message and a log line. The URL is never logged. |
+| A child exits or crashes | Logged always. If an alert chat is set, also a Telegram message ("CRASH: ..."), at most one per child every 10 minutes. Heartbeats are withheld while a child is down or not yet stable, so a crash-loop pages the on-call through the dead-man. |
+| The supervisor starts or stops | Logged always. If an alert chat is set, also a Telegram message (a start after a reboot shows that it came back). A stop ends heartbeats, so the dead-man pages the on-call. |
+| A heartbeat ping fails | Logged always. If an alert chat is set, also a Telegram message. The URL is never logged. |
 | The host is down, the supervisor hangs, or a child crash-loops | The heartbeat service stops getting pings and pages the on-call. |
 
 ### Health and logs
