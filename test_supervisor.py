@@ -100,6 +100,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             supervisor.read_heartbeat_url()
 
+    def test_heartbeat_without_alert_chat_is_valid(self):
+        os.environ["DATAOPS_TELEGRAM_BOT_TOKEN"] = "fake-token-value"
+        os.environ["OPERATOR_COMMS_HEARTBEAT_URL"] = "https://hc.example.invalid/ping/abc"
+        self.assertEqual(supervisor.check_config(self.base, require_heartbeat=True), [])
+        self.assertIsNone(supervisor.read_alert_chat(self.base))
+
 
 class StatusTests(unittest.TestCase):
     def status(self, **over):

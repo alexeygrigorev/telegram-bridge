@@ -136,17 +136,22 @@ def check_config(base_dir: Path, require_heartbeat: bool) -> list[str]:
     problems = []
     if not os.environ.get(TOKEN_ENV, "").strip():
         problems.append(f"{TOKEN_ENV} is required")
+    heartbeat_ok = False
     if require_heartbeat:
         try:
             read_heartbeat_url()
+            heartbeat_ok = True
         except ValueError as error:
             problems.append(str(error))
     if not (HERE / "relay.py").is_file():
         problems.append("relay.py is missing next to supervisor.py")
     if not base_dir.is_dir():
         problems.append(f"base dir {base_dir} does not exist")
-    elif read_alert_chat(base_dir) is None:
-        problems.append("no alert chat: set DATAOPS_TELEGRAM_ALERT_CHAT or write one id to alert_chat.txt")
+    elif read_alert_chat(base_dir) is None and not heartbeat_ok:
+        problems.append(
+            "no alert chat: set DATAOPS_TELEGRAM_ALERT_CHAT or write one id to alert_chat.txt "
+            "(or configure an HTTPS heartbeat so the dead-man can page instead)"
+        )
     return problems
 
 
