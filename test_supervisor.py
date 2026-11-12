@@ -1,4 +1,7 @@
+import io
 import json
+import signal
+from contextlib import redirect_stdout
 import os
 import sys
 import tempfile
@@ -106,6 +109,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(supervisor.check_config(self.base, require_heartbeat=True), [])
         self.assertIsNone(supervisor.read_alert_chat(self.base))
 
+    def test_personal_chat_is_rejected_from_env_and_file_without_sending(self):
+        for source in ("env", "file"):
+            with self.subTest(source=source):
+                os.environ.pop("DATAOPS_TELEGRAM_ALERT_CHAT", None)
+                (self.base / "alert_chat.txt").write_text("822266080\n")
+                if source == "env":
+                    # A blocked explicit value must not fall back to a file.
+                    (self.base / "alert_chat.txt").write_text("100000001\n")
+                    os.environ["DATAOPS_TELEGRAM_ALERT_CHAT"] = "822266080"
+                os.environ["DATAOPS_TELEGRAM_BOT_TOKEN"] = "fake-token"
+                os.environ["OPERATOR_COMMS_HEARTBEAT_URL"] = "https://hc.example.invalid/check"
+                self.assertIsNone(supervisor.read_alert_chat(self.base))
+                self.assertEqual(supervisor.check_config(self.base, require_heartbeat=True), [])
+                self.assertTrue(supervisor.check_config(self.base, require_heartbeat=False))
+                with mock.patch.object(supervisor.urllib.request, "urlopen") as send:
+                    self.assertFalse(supervisor.Alerter(self.base, "test")("crash", "CRASH: test"))
+                send.assert_not_called()
+
 
 class StatusTests(unittest.TestCase):
     def status(self, **over):
@@ -130,41 +151,62 @@ class StatusTests(unittest.TestCase):
 
 
 class SuperviseTests(unittest.TestCase):
-    """End to end: a crashing child is restarted, alerted and reported in the status file."""
+    """Real children complete two observed cycles; network alerts are captured."""
 
-    def test_crash_is_restarted_and_alerted(self):
-        with tempfile.TemporaryDirectory() as folder:
-            base = Path(folder)
-            marker = base / "runs"
-            script = base / "child.py"
-            script.write_text("import sys\nopen(sys.argv[1], 'a').write('x')\nsys.exit(7)\n")
-            children = [supervisor.Child("flaky", [sys.executable, str(script), str(marker)])]
-            alerts = []
-            alert = lambda key, text, force=False: alerts.append(text) or True  # noqa: E731
+    def test_exit_classification_and_restart(self):
+        for rc in (0, 7, -signal.SIGTERM):
+            with self.subTest(rc=rc), tempfile.TemporaryDirectory() as folder:
+                base = Path(folder)
+                command = ("import os, signal; os.kill(os.getpid(), signal.SIGTERM)"
+                           if rc < 0 else f"import sys; sys.exit({rc})")
+                child = supervisor.Child("sync", [sys.executable, "-c", command])
+                alerts = []
+                statuses = []
+                output = io.StringIO()
+                clock = [100.0]
+                real_write = supervisor.write_status
 
-            with mock.patch.object(supervisor, "MIN_RESTART_DELAY", 0), \
-                    mock.patch.object(supervisor.time, "sleep", side_effect=lambda s: time_sleep(0.05)):
-                children[0].restart_delay = 0
-                deadline = time.time() + 5
-
-                def stop_when_restarted(*_a):
-                    if (marker.exists() and len(marker.read_text()) >= 2) or time.time() > deadline:
+                def advance(_seconds):
+                    if child.restarts >= 2:
                         raise KeyboardInterrupt
-                with mock.patch.object(supervisor, "write_status",
-                                       side_effect=lambda *a: (real_write(*a), stop_when_restarted())):
-                    try:
-                        supervisor.supervise(children, base, None, 60, alert)
-                    except KeyboardInterrupt:
-                        pass
+                    if child.process is not None:
+                        child.process.wait(timeout=5)
+                    clock[0] += 10
 
-            self.assertGreaterEqual(len(marker.read_text()), 2)
-            self.assertTrue(any("CRASH: flaky exited rc=7" in a for a in alerts))
-            self.assertTrue(any("supervisor started" in a for a in alerts))
-            self.assertTrue(any("supervisor stopped" in a for a in alerts))
+                def capture_status(*args):
+                    real_write(*args)
+                    statuses.append(json.loads((base / "supervisor.status.json").read_text()))
 
+                timer = mock.Mock(wraps=time)
+                timer.monotonic.side_effect = lambda: clock[0]
+                timer.sleep.side_effect = advance
+                with mock.patch.object(supervisor.signal, "signal"), \
+                        mock.patch.object(supervisor, "time", timer), \
+                        mock.patch.object(supervisor, "write_status", side_effect=capture_status), \
+                        redirect_stdout(output):
+                    with self.assertRaises(KeyboardInterrupt):
+                        supervisor.supervise([child], base, None, 60,
+                                             lambda key, text, force=False: alerts.append(text))
 
-time_sleep = time.sleep
-real_write = supervisor.write_status
+                self.assertEqual(child.restarts, 2)
+                self.assertEqual(output.getvalue().count(f"child exited name=sync rc={rc}"), 2)
+                self.assertIn("restarting in", output.getvalue())
+                self.assertEqual(statuses[-1]["children"]["sync"]["last_exit"], f"rc={rc} after 10s")
+                crash_alerts = [text for text in alerts if text.startswith("CRASH:")]
+                if rc == 0:
+                    self.assertEqual(crash_alerts, [])
+                    self.assertNotIn("CRASH", output.getvalue())
+                else:
+                    self.assertEqual(len(crash_alerts), 2)
+                    self.assertIn(f"CRASH: sync exited rc={rc}", crash_alerts[0])
+
+    def test_python_children_are_unbuffered_and_keep_environment(self):
+        child = supervisor.Child("sync", [sys.executable, "sync.py"])
+        with mock.patch.dict(os.environ, {"PYTHONUNBUFFERED": "0", "SYNC_SETTING": "kept"}), \
+                mock.patch.object(supervisor.subprocess, "Popen") as popen:
+            supervisor.start_child(child, 100)
+        self.assertEqual(popen.call_args.kwargs["env"]["PYTHONUNBUFFERED"], "1")
+        self.assertEqual(popen.call_args.kwargs["env"]["SYNC_SETTING"], "kept")
 
 
 if __name__ == "__main__":

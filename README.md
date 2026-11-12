@@ -15,9 +15,10 @@ with only the standard library.
   children are alive.
 - `tg-reply` is a CLI for sending replies, long texts and files as the bot.
 
-No tokens, chat ids or user ids are built in. Secrets come from the
+No tokens, destination chat ids or allowed user ids are built in. Secrets come from the
 environment. Ids come from the environment or from small files in the base
-directory, and those files are git-ignored.
+directory, and those files are git-ignored. The known personal chat is blocked
+from automated alerts, including when an old config still names it.
 
 ## Install
 
@@ -39,14 +40,14 @@ checkout itself. To use another one, pass `--base-dir` or set
 | Variable | Required | Purpose |
 |---|---|---|
 | `DATAOPS_TELEGRAM_BOT_TOKEN` | yes | Bot token from BotFather. |
-| `OPERATOR_COMMS_HEARTBEAT_URL` | supervisor | HTTPS ping URL of an external dead-man check (healthchecks.io, Better Stack, Cronitor, ...). If pings stop, that service should page the on-call. |
+| `OPERATOR_COMMS_HEARTBEAT_URL` | supervisor | HTTPS ping URL of an external dead-man check (healthchecks.io, Better Stack, Cronitor, ...). Configure its failure recipient as dev@ / on-call, never a personal address or channel. |
 | `OPERATOR_COMMS_HEARTBEAT_TOKEN` | no | Bearer token sent with each heartbeat, for endpoints that need auth. Heartbeats are a JSON `POST` (`{"source":"telegram-bridge","host":...}`). |
 | `DATAOPS_ROUTINE_WEBHOOK_URL` | no | Where messages are POSTed. If it is unset, messages are queued in `inbox.jsonl`. |
 | `DATAOPS_ROUTINE_WEBHOOK_KEY` | no | Value of the webhook auth header. For `Authorization`, `Bearer ` is added if missing. |
 | `DATAOPS_ROUTINE_WEBHOOK_HEADER` | no | Name of the auth header (default `Authorization`). |
 | `DATAOPS_TELEGRAM_ALLOWED_USERS` | no | Extra allowed user ids, comma separated. |
 | `DATAOPS_TELEGRAM_FORWARD_CHATS` | no | Extra forward-all chat ids, comma separated. |
-| `DATAOPS_TELEGRAM_ALERT_CHAT` | no | Chat id for alerts (overrides `alert_chat.txt`). |
+| `DATAOPS_TELEGRAM_ALERT_CHAT` | no | Explicit operator chat for alerts (overrides `alert_chat.txt`); never Alexey's personal chat or channels. No default destination. |
 | `DATAOPS_TELEGRAM_BASE_DIR` | no | Directory for state, config and logs. |
 
 The variables keep their `DATAOPS_` prefix because the first deployment
@@ -63,10 +64,13 @@ the files on every message, so changes need no restart.
 | `forward_chats.txt` | Group chat ids whose messages are all forwarded, from any member. |
 | `alert_chat.txt` | One chat id that receives alerts about drops, webhook failures, crashes and heartbeat failures. |
 
-If no alert chat is configured, alerts only go to the log. `--check`
+If no valid operator alert chat is configured, alerts only go to the log. `--check`
 still passes when an external heartbeat is configured, so the dead-man can
-page the on-call. Without both an alert chat and a heartbeat, `--check`
-fails.
+page dev@ / on-call. There is no fallback to a personal chat. A blocked or
+invalid explicit environment value does not fall back to the file. Without
+both an operator alert chat and a heartbeat, `--check` fails. Copy
+`.env.example` as a configuration checklist; supply secrets through your
+service environment. The supervisor does not load dotenv files.
 
 ### Webhook payload
 
@@ -95,6 +99,12 @@ the relay, for example a sync loop:
 python3 supervisor.py --child "library-sync=python3 /srv/repo/scripts/sync.py --daemon loop"
 ```
 
+All Python children inherit `PYTHONUNBUFFERED=1`, so sync output is visible
+immediately in the supervisor's output (`supervisor.log` with `--ensure`).
+Every completed cycle logs its return code and restart delay. A clean exit
+(`rc=0`, including a daemon stop/restart) is a normal exit and restart; only
+a non-zero return code or a signal produces a `CRASH` alert.
+
 Only one supervisor runs per base directory (lock file `.supervisor.lock`),
 and only one relay (lock file `.relay.lock`). A second relay exits with code
 3, and the supervisor reports it as a likely double start.
@@ -112,10 +122,15 @@ Options:
 
 | Event | Alert |
 |---|---|
-| A child exits or crashes | Logged always. If an alert chat is set, also a Telegram message ("CRASH: ..."), at most one per child every 10 minutes. Heartbeats are withheld while a child is down or not yet stable, so a crash-loop pages the on-call through the dead-man. |
+| A child exits cleanly (`rc=0`) | Logged as an exit and restarted with backoff. No crash alert. |
+| A child exits with non-zero rc or a signal | Logged always. If an operator alert chat is set, also a Telegram message ("CRASH: ..."), at most one per child every 10 minutes. |
 | The supervisor starts or stops | Logged always. If an alert chat is set, also a Telegram message (a start after a reboot shows that it came back). A stop ends heartbeats, so the dead-man pages the on-call. |
 | A heartbeat ping fails | Logged always. If an alert chat is set, also a Telegram message. The URL is never logged. |
 | The host is down, the supervisor hangs, or a child crash-loops | The heartbeat service stops getting pings and pages the on-call. |
+
+Heartbeats are withheld while any child is down or has run for less than
+30 seconds, including after a clean restart. Repeated short clean cycles
+can therefore page dev@ through the dead-man as an availability problem.
 
 ### Health and logs
 

@@ -16,6 +16,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+from alert_config import read_alert_chat
 
 BASE_DIR = os.environ.get("DATAOPS_TELEGRAM_BASE_DIR") or os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "state.json")
@@ -30,7 +33,7 @@ LOCK_FILE = os.path.join(BASE_DIR, ".relay.lock")
 POLL_TIMEOUT = 50
 TOKEN_ENV = "DATAOPS_TELEGRAM_BOT_TOKEN"
 
-# No chat or user ids are built in. Forward-all group chats come from
+# No destination chat or allowed user ids are built in. Forward-all chats come from
 # forward_chats.txt / DATAOPS_TELEGRAM_FORWARD_CHATS, the allowlist from
 # allowed_users.txt / DATAOPS_TELEGRAM_ALLOWED_USERS, and the chat that receives
 # drop/failure alerts from alert_chat.txt / DATAOPS_TELEGRAM_ALERT_CHAT.
@@ -145,10 +148,7 @@ def forward_chats():
 
 def alert_chat():
     """Chat id for loud alerts, or None when not configured (env wins over file)."""
-    ids = read_ids("DATAOPS_TELEGRAM_ALERT_CHAT", None)
-    if not ids:
-        ids = read_ids(None, ALERT_CHAT_FILE)
-    return next(iter(ids)) if len(ids) == 1 else None
+    return read_alert_chat(Path(BASE_DIR))
 
 
 _last_alert = {}

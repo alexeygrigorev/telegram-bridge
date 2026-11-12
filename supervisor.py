@@ -7,7 +7,7 @@ Foreground supervisor for relay.py. It:
 * sends an external HTTPS heartbeat (dead-man switch) only while every child
   is alive, so a crash loop, a hung supervisor or a dead host all show up as
   missing pings at the heartbeat service, which pages the on-call;
-* sends a Telegram alert to the relay's alert chat whenever a child exits,
+* sends a Telegram alert to an explicit operator chat whenever a child crashes,
   the heartbeat fails, or the supervisor starts/stops;
 * writes supervisor.status.json so `--status` can tell whether it is healthy;
 * holds a lock so only one supervisor (and so one relay) runs per base dir.
@@ -31,6 +31,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from alert_config import read_alert_chat
 
 HERE = Path(__file__).resolve().parent
 MIN_RESTART_DELAY = 5
@@ -118,19 +120,6 @@ def read_heartbeat_url() -> str:
     return url
 
 
-def read_alert_chat(base_dir: Path) -> int | None:
-    raw = os.environ.get("DATAOPS_TELEGRAM_ALERT_CHAT", "").strip()
-    if not raw:
-        try:
-            lines = (base_dir / "alert_chat.txt").read_text().splitlines()
-        except FileNotFoundError:
-            lines = []
-        values = [line.split("#", 1)[0].strip() for line in lines]
-        values = [v for v in values if v]
-        raw = values[0] if len(values) == 1 else ""
-    return int(raw) if raw.lstrip("-").isdigit() else None
-
-
 def check_config(base_dir: Path, require_heartbeat: bool) -> list[str]:
     """Return a list of problems (empty when valid). Never includes values."""
     problems = []
@@ -149,7 +138,7 @@ def check_config(base_dir: Path, require_heartbeat: bool) -> list[str]:
         problems.append(f"base dir {base_dir} does not exist")
     elif read_alert_chat(base_dir) is None and not heartbeat_ok:
         problems.append(
-            "no alert chat: set DATAOPS_TELEGRAM_ALERT_CHAT or write one id to alert_chat.txt "
+            "no operator alert chat: set DATAOPS_TELEGRAM_ALERT_CHAT or write one non-personal id to alert_chat.txt "
             "(or configure an HTTPS heartbeat so the dead-man can page instead)"
         )
     return problems
@@ -192,7 +181,10 @@ class Alerter:
 def start_child(child: Child, now: float) -> None:
     log(f"starting child={child.name}")
     try:
-        child.process = subprocess.Popen(child.command, stdin=subprocess.DEVNULL, start_new_session=True)
+        child.process = subprocess.Popen(
+            child.command, stdin=subprocess.DEVNULL, start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
         child.started_at = now
     except OSError as error:
         delay = child.restart_delay
@@ -330,8 +322,9 @@ def supervise(children: list[Child], base_dir: Path, heartbeat_url: str | None, 
                 log(f"child exited name={child.name} rc={return_code} after {int(runtime)}s; restarting in {delay}s")
                 hint = " (another relay holds the lock: two relays?)" if (
                     child.name == "telegram-relay" and return_code == RELAY_LOCK_HELD_RC) else ""
-                alert(f"exit:{child.name}", f"CRASH: {child.name} exited rc={return_code} after "
-                      f"{int(runtime)}s{hint}; restarting in {delay}s")
+                if return_code != 0:
+                    alert(f"exit:{child.name}", f"CRASH: {child.name} exited rc={return_code} after "
+                          f"{int(runtime)}s{hint}; restarting in {delay}s")
 
             if now >= next_heartbeat_at:
                 healthy = all(child_is_stable(c, now) for c in children)
