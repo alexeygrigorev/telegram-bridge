@@ -294,16 +294,26 @@ def handle_message(msg, state):
         payload["reply_to_message_id"] = msg["reply_to_message"].get("message_id")
     ok, reason = post_webhook(payload)
     if ok:
-        log.info("forwarded message_id=%s chat_id=%s user_id=%s", payload["message_id"], chat_id, uid)
+        # Full content in the log so messages can be recovered if the routine loses them.
+        log.info("forwarded %s", describe(payload))
         return
     append_inbox(payload, reason)
-    log.error("NOT FORWARDED, queued to inbox.jsonl message_id=%s chat_id=%s user_id=%s (%s)",
-              payload["message_id"], chat_id, uid, reason)
+    log.error("NOT FORWARDED, queued to inbox.jsonl %s (%s)", describe(payload), reason)
     alert("webhook:" + reason, "message_id=%s from user_id=%s in chat_id=%s was NOT delivered to the routine (%s); "
           "queued in inbox.jsonl" % (payload["message_id"], uid, chat_id, reason))
     if reason == "webhook_not_configured":
         safe_tg("sendMessage", {"chat_id": chat_id, "text": "Got it, the assistant isn't connected yet.",
                                 "reply_to_message_id": msg.get("message_id")})
+
+
+def describe(payload):
+    """One log line with everything needed to recover a message: ids, date, reply_to, text."""
+    date = payload.get("date")
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(date)) if isinstance(date, (int, float)) else date
+    return ("message_id=%s chat_id=%s user_id=%s username=%s date=%s reply_to=%s attachments=%d text=%r"
+            % (payload.get("message_id"), payload.get("chat_id"), payload.get("user_id"), payload.get("username"),
+               when, payload.get("reply_to_message_id"), len(payload.get("attachments") or []),
+               (payload.get("text") or "")[:4000]))
 
 
 # ---------- main loop ----------

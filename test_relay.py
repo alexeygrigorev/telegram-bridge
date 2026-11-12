@@ -54,6 +54,24 @@ class RelayTest(unittest.TestCase):
         self.assertEqual(self.messages(), [])
         self.assertFalse(os.path.exists(self.relay.DENIED_FILE))
 
+    def test_forwarded_message_is_logged_with_text_date_and_reply_to(self):
+        msg = group_msg(MEMBER, text="Draft is in the doc, @orin please check")
+        msg["date"] = 1794409200  # 2026-11-11T15:00:00Z
+        msg["reply_to_message"] = {"message_id": 5}
+        os.environ[self.relay.TOKEN_ENV] = "123456:SECRET-TOKEN"
+        self.addCleanup(os.environ.pop, self.relay.TOKEN_ENV, None)
+        msg["text"] += " 123456:SECRET-TOKEN"
+        with mock.patch.object(self.relay, "post_webhook", return_value=(True, "ok")):
+            self.relay.handle_message(msg, {})
+        for h in self.relay.log.handlers:
+            h.flush()
+        with open(self.relay.LOG_FILE) as f:
+            line = [l for l in f if " forwarded " in l][0]
+        for part in ("message_id=7", "user_id=%d" % MEMBER, "date=2026-11-11T15:00:00Z", "reply_to=5",
+                     "Draft is in the doc, @orin please check"):
+            self.assertIn(part, line)
+        self.assertNotIn("SECRET-TOKEN", line)
+
     def test_forward_chats_extendable_from_file_and_env(self):
         with open(self.relay.CHATS_FILE, "a") as f:
             f.write("-100555  # other group\n")

@@ -124,6 +124,11 @@ tail supervisor.log              # supervisor (when started with --ensure)
 tail inbox.jsonl denied.jsonl    # queued / dropped messages
 ```
 
+Every forwarded message is logged in `relay.log` with its ids, date (UTC), the
+message it replies to, and its text, so messages can be recovered from the log
+if the routine loses them. The bot token and webhook key are scrubbed from all
+log lines.
+
 ## tg-reply
 
 ```bash
