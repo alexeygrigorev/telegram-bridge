@@ -130,6 +130,18 @@ class RelayTest(unittest.TestCase):
         self.addCleanup(os.environ.pop, "DATAOPS_TELEGRAM_ALERT_CHAT")
         self.assertEqual(self.relay.alert_chat(), -100777)
 
+    def test_personal_chat_never_receives_system_alerts(self):
+        for source in ("env", "file"):
+            with self.subTest(source=source):
+                os.environ.pop("DATAOPS_TELEGRAM_ALERT_CHAT", None)
+                with open(self.relay.ALERT_CHAT_FILE, "w") as f:
+                    f.write("822266080\n" if source == "file" else str(OWNER))
+                if source == "env":
+                    os.environ["DATAOPS_TELEGRAM_ALERT_CHAT"] = "822266080"
+                self.assertIsNone(self.relay.alert_chat())
+                self.assertFalse(self.relay.alert("failure", "webhook failed"))
+        self.assertEqual(self.messages(), [])
+
     def test_missing_alert_chat_is_logged_not_sent(self):
         os.remove(os.path.join(self.tmp.name, "alert_chat.txt"))
         with self.assertLogs("relay", level="ERROR") as logs:
