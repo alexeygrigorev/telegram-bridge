@@ -123,7 +123,7 @@ Options:
 | Event | Alert |
 |---|---|
 | A child exits cleanly (`rc=0`) | Logged as an exit and restarted with backoff. No crash alert. |
-| A child exits with non-zero rc or a signal | Logged always. If an operator alert chat is set, also a Telegram message ("CRASH: ..."), at most one per child every 10 minutes. |
+| A child exits with non-zero rc or a signal | Logged always. If an operator alert chat is set, also a Telegram message ("CRASH: ..."), at most one per child every 10 minutes. A known lock conflict names itself: `rc=3` for the relay (another relay) and `rc=4` for `grok-library-sync` (another sync loop, legacy daemon?). |
 | The supervisor starts or stops | Logged always. If an alert chat is set, also a Telegram message (a start after a reboot shows that it came back). A stop ends heartbeats, so the dead-man pages the on-call. |
 | A heartbeat ping fails | Logged always. If an alert chat is set, also a Telegram message. The URL is never logged. |
 | The host is down, the supervisor hangs, or a child crash-loops | The heartbeat service stops getting pings and pages the on-call. |

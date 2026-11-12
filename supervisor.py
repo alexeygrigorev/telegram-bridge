@@ -44,6 +44,7 @@ TOKEN_ENV = "DATAOPS_TELEGRAM_BOT_TOKEN"
 HEARTBEAT_ENV = "OPERATOR_COMMS_HEARTBEAT_URL"
 HEARTBEAT_TOKEN_ENV = "OPERATOR_COMMS_HEARTBEAT_TOKEN"
 RELAY_LOCK_HELD_RC = 3
+SYNC_LOCK_HELD_RC = 4
 
 
 @dataclass
@@ -82,6 +83,15 @@ def heartbeat_failure_message(error: BaseException) -> str:
     if isinstance(error, urllib.error.HTTPError):
         return f"external heartbeat returned HTTP {error.code}"
     return f"external heartbeat failed ({type(error).__name__})"
+
+
+def exit_hint(child_name: str, return_code: int) -> str:
+    """Name the known lock conflicts so an exit code points at the fix."""
+    if child_name == "telegram-relay" and return_code == RELAY_LOCK_HELD_RC:
+        return " (another relay holds the lock: two relays?)"
+    if child_name == "grok-library-sync" and return_code == SYNC_LOCK_HELD_RC:
+        return " (another sync loop holds the lock: legacy daemon?)"
+    return ""
 
 
 def log(message: str) -> None:
@@ -319,9 +329,9 @@ def supervise(children: list[Child], base_dir: Path, heartbeat_url: str | None, 
                 child.process = None
                 child.restarts += 1
                 child.last_exit = f"rc={return_code} after {int(runtime)}s"
-                log(f"child exited name={child.name} rc={return_code} after {int(runtime)}s; restarting in {delay}s")
-                hint = " (another relay holds the lock: two relays?)" if (
-                    child.name == "telegram-relay" and return_code == RELAY_LOCK_HELD_RC) else ""
+                hint = exit_hint(child.name, return_code)
+                log(f"child exited name={child.name} rc={return_code} after {int(runtime)}s{hint}; "
+                    f"restarting in {delay}s")
                 if return_code != 0:
                     alert(f"exit:{child.name}", f"CRASH: {child.name} exited rc={return_code} after "
                           f"{int(runtime)}s{hint}; restarting in {delay}s")
